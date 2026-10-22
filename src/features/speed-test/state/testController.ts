@@ -3,8 +3,7 @@
  * Regras: uma sessão ativa por controlador; início duplicado bloqueado;
  * erro não converte métricas ausentes em zero; cancelamento preserva parciais.
  */
-import type { SpeedTestAdapter } from '../engine/SpeedTestAdapter';
-import type { CloudflareSpeedTestAdapter } from '../engine/CloudflareSpeedTestAdapter';
+import type { SpeedTestAdapter, AdapterEvents } from '../engine/SpeedTestAdapter';
 import type { LiveMetrics, LivePhase, SpeedTestSession } from '../engine/engineTypes';
 import type { TestProfile } from '../engine/profileRegistry';
 import { getProfile, buildCustomProfile, PROFILES } from '../engine/profileRegistry';
@@ -39,14 +38,29 @@ export type ControllerSnapshot = {
 
 type Listener = () => void;
 
+/** Fábrica de adaptadores — permite injetar um motor falso em testes E2E locais. */
+export type AdapterOptions = {
+  profile: TestProfile;
+  events: AdapterEvents;
+};
+export type AdapterFactory = (opts: AdapterOptions) => SpeedTestAdapter | Promise<SpeedTestAdapter>;
+
+/** Motor de produção (Cloudflare). Pode ser substituído por injeção no construtor. */
+const productionAdapterFactory: AdapterFactory = async (opts) => {
+  const { CloudflareSpeedTestAdapter } = await import('../engine/CloudflareSpeedTestAdapter');
+  return new CloudflareSpeedTestAdapter(opts);
+};
+
 export class TestController {
   private adapter: SpeedTestAdapter | null = null;
   private snapshot: ControllerSnapshot;
   private listeners = new Set<Listener>();
   private channel: BroadcastChannel | null = null;
   private crossTabRunning = false;
+  private adapterFactory: AdapterFactory;
 
-  constructor() {
+  constructor(adapterFactory?: AdapterFactory) {
+    this.adapterFactory = adapterFactory ?? productionAdapterFactory;
     this.snapshot = {
       state: 'idle',
       livePhase: 'idle',
@@ -130,41 +144,42 @@ export class TestController {
     this.channel?.postMessage({ type: 'test-started' });
 
     const profile = this.currentProfile;
-    // Import dinâmico do adaptador mantém o motor fora do caminho crítico de render inicial.
-    void import('../engine/CloudflareSpeedTestAdapter')
-      .then(({ CloudflareSpeedTestAdapter: Adapter }) => {
-        if (this.snapshot.state !== 'checking') return; // página mudou de estado entretanto
-        const adapter: CloudflareSpeedTestAdapter = new Adapter({
-          profile,
-          events: {
-            onPhaseChange: (phase, index, total) => {
-              this.set({
-                state: this.snapshot.state === 'paused' ? 'paused' : 'running',
-                livePhase: phase,
-              });
-            },
-            onProgress: (live) => {
-              this.set({ live });
-            },
-            onFinish: (session) => {
-              this.teardownAdapter();
-              this.channel?.postMessage({ type: 'test-finished' });
-              this.set({ state: 'processing', livePhase: 'processing_results' });
-              void this.finalize(session, 'completed');
-            },
-            onPartial: (session) => {
-              const wasCancelling = this.snapshot.state === 'cancelling';
-              this.teardownAdapter();
-              this.channel?.postMessage({ type: 'test-finished' });
-              const st: TestState = wasCancelling ? 'cancelled' : this.snapshot.state === 'failed' ? 'failed' : 'partial';
-              this.set({ state: st, livePhase: wasCancelling ? 'cancelled' : 'partial', session });
-              if (session.status !== 'cancelled') void historyRepository.save(session).catch(() => undefined);
-            },
-            onError: (_message, _status) => {
-              this.set({ state: 'failed', livePhase: 'failed', errorKey: mapErrorKey(_message) });
-            },
-          },
-        });
+    // Fábrica de adaptadores: produção usa import dinâmico do motor Cloudflare
+    // (mantém-no fora do caminho crítico de render inicial); testes E2E locais
+    // injetam um motor falso determinístico via construtor.
+    void Promise.resolve(this.adapterFactory({
+      profile,
+      events: {
+        onPhaseChange: (phase) => {
+          this.set({
+            state: this.snapshot.state === 'paused' ? 'paused' : 'running',
+            livePhase: phase,
+          });
+        },
+        onProgress: (live) => {
+          this.set({ live });
+        },
+        onFinish: (session) => {
+          this.teardownAdapter();
+          this.channel?.postMessage({ type: 'test-finished' });
+          this.set({ state: 'processing', livePhase: 'processing_results' });
+          void this.finalize(session, 'completed');
+        },
+        onPartial: (session) => {
+          const wasCancelling = this.snapshot.state === 'cancelling';
+          this.teardownAdapter();
+          this.channel?.postMessage({ type: 'test-finished' });
+          const st: TestState = wasCancelling ? 'cancelled' : this.snapshot.state === 'failed' ? 'failed' : 'partial';
+          this.set({ state: st, livePhase: wasCancelling ? 'cancelled' : 'partial', session });
+          if (session.status !== 'cancelled') void historyRepository.save(session).catch(() => undefined);
+        },
+        onError: (_message, _status) => {
+          this.set({ state: 'failed', livePhase: 'failed', errorKey: mapErrorKey(_message) });
+        },
+      },
+    }))
+      .then((adapter) => {
+        if (this.snapshot.state !== 'checking') { adapter.dispose(); return; } // estado mudou entretanto
         this.adapter = adapter;
         this.set({ state: 'ready', livePhase: 'ready' });
         // Início imediato após ação explícita do utilizador que chamou start().

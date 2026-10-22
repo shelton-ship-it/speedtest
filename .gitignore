@@ -1,1 +1,15 @@
+# dependencies
+/node_modules
+
+# build output
+/.next/
+/out/
+
+# logs
 *.log
+
+# TS incremental build info
+*.tsbuildinfo
+
+# testing
+/coverage

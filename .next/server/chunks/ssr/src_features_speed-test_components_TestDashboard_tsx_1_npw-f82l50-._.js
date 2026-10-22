@@ -1,3 +1,0 @@
-module.exports=[79087,a=>{"use strict";let b=(0,a.i(11857).registerClientReference)(function(){throw Error("Attempted to call SpeedTestApp() from the server but SpeedTestApp is on the client. It's not possible to invoke a client function from the server, it can only be rendered as a Component or passed to props of a Client Component.")},"[project]/src/features/speed-test/components/TestDashboard.tsx","SpeedTestApp");a.s(["SpeedTestApp",0,b])},36818,a=>{"use strict";var b=a.i(79087);a.n(b)},98701,function(a){a.n(a.i(36818))}];
-
-//# sourceMappingURL=src_features_speed-test_components_TestDashboard_tsx_1_npw-f82l50-._.js.map

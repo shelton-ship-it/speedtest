@@ -1,6 +1,7 @@
 'use client';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useI18n } from '../i18n/useI18n';
+import { LAND_POLYGONS } from '../data/land110m';
 
 /**
  * Mini globo 3D (Canvas 2D, sem dependências externas).
@@ -150,9 +151,40 @@ export function MiniGlobe({ spinning }: { spinning: boolean }) {
         ctx!.stroke();
         ctx!.globalAlpha = 1;
 
+        // continentes (Natural Earth 110m) — recortados pela esfera, frente apenas
+        ctx!.save();
+        ctx!.beginPath();
+        ctx!.arc(cx, cy, R - 0.5, 0, Math.PI * 2);
+        ctx!.clip();
+        for (const poly of LAND_POLYGONS) {
+          let started = false;
+          let anyFront = false;
+          for (const [lo, la] of poly) {
+            const p = project(la, lo, yaw, R);
+            if (p.front) anyFront = true;
+          }
+          if (!anyFront) continue;
+          ctx!.beginPath();
+          for (const [lo, la] of poly) {
+            const p = project(la, lo, yaw, R);
+            if (!started) { ctx!.moveTo(cx + p.x, cy + p.y); started = true; }
+            else ctx!.lineTo(cx + p.x, cy + p.y);
+          }
+          ctx!.closePath();
+          ctx!.fillStyle = accent;
+          ctx!.globalAlpha = 0.14;
+          ctx!.fill();
+          ctx!.strokeStyle = accent;
+          ctx!.globalAlpha = 0.5;
+          ctx!.lineWidth = 0.8;
+          ctx!.stroke();
+          ctx!.globalAlpha = 1;
+        }
+        ctx!.restore();
+
         // grelha (meridianos/paralelos)
         ctx!.strokeStyle = accent;
-        ctx!.globalAlpha = 0.16;
+        ctx!.globalAlpha = 0.10;
         for (let m = 0; m < 6; m++) {
           const phase = ((yaw * 0.5 + (m * Math.PI) / 6) % Math.PI + Math.PI) % Math.PI;
           const rx = Math.abs(Math.cos(phase)) * R;

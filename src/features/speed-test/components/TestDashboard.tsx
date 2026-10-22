@@ -2,6 +2,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { TestController, PROFILES } from '../state/testController';
 import { SessionReport } from './SessionReport';
+import { MiniGlobe } from './MiniGlobe';
+import { LiveThroughputChart, type LivePoint } from './LiveThroughputChart';
 import { useI18n, I18nContext, makeI18n } from '../i18n/useI18n';
 import type { Locale } from '../i18n/i18n';
 import { historyRepository } from '../storage/indexedDb';
@@ -45,6 +47,28 @@ export function SpeedTestApp() {
   const shown = (mbps: number | null | undefined) => (mbps === null || mbps === undefined ? null : unitMb ? mbpsToMBs(mbps) : mbps);
   const unitLabel = unitMb ? 'MB/s' : 'Mbps';
 
+  // Buffer ao vivo para o gráfico Canvas (atualizado por ref — sem re-render por amostra).
+  const livePointsRef = useRef<LivePoint[]>([]);
+  useEffect(() => {
+    if (snap.state === 'checking') livePointsRef.current = []; // novo teste: limpar
+    const dl = shown(live?.downloadMbps ?? null);
+    const ul = shown(live?.uploadMbps ?? null);
+    if (live) {
+      const arr = livePointsRef.current;
+      const last = arr[arr.length - 1];
+      if (last && Date.now() - last.t < 250 && (last.dl === dl || dl === null) && (last.ul === ul || ul === null)) {
+        // coalescer atualizações muito próximas mantendo a última leitura conhecida
+        arr[arr.length - 1] = { ...last, t: Date.now(), dl: dl ?? last.dl, ul: ul ?? last.ul };
+      } else {
+        arr.push({ t: Date.now(), dl, ul });
+      }
+      if (arr.length > 800) arr.splice(0, arr.length - 800);
+    }
+  }, [live, unitMb]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const spinning = ['running', 'paused', 'cancelling', 'processing'].includes(snap.state);
+  const phaseLabelKey = PHASE_LABEL[snap.livePhase] ?? 'phase.idle';
+
   return (
     <I18nContext.Provider value={i18n}>
       <header className="site">
@@ -58,6 +82,11 @@ export function SpeedTestApp() {
         </div>
       </header>
       <main id="main">
+        <div className="layout-with-sidebar">
+          <aside className="sidebar no-print" aria-label={t('globe.sidebarLabel')}>
+            <MiniGlobe spinning={spinning} />
+          </aside>
+          <div className="content-col">
         <p className="muted">{t('app.subtitle')}</p>
         <p className="muted">{t('unit.note.mbpsVsMBs')}</p>
         <p className="muted">{t('about.engineNotice')}</p>
@@ -106,6 +135,14 @@ export function SpeedTestApp() {
           <p role="status" aria-live="polite" className="muted">{t(PHASE_LABEL[snap.livePhase] ?? 'phase.idle')}</p>
 
           {live && (
+            <LiveThroughputChart
+              pointsRef={livePointsRef}
+              phase={snap.livePhase}
+              phaseLabel={t(phaseLabelKey)}
+              unit={unitLabel}
+            />
+          )}
+          {live && (
             <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))' }}>
               {([['metric.download', shown(live.downloadMbps)], ['metric.upload', shown(live.uploadMbps)], ['metric.latency', live.unloadedLatencyMs], ['metric.loadedLatencyDown', live.downloadLoadedLatencyMs], ['metric.loadedLatencyUp', live.uploadLoadedLatencyMs]] as const).map(([k, v]) => (
                 <div className="card" key={k}>
@@ -139,6 +176,8 @@ export function SpeedTestApp() {
         )}
 
         <HistorySection />
+          </div>{/* .content-col */}
+        </div>{/* .layout-with-sidebar */}
       </main>
       <footer className="site">
         {t('about.privacy')} {`v0.1.0`}

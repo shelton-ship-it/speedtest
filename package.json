@@ -1,0 +1,35 @@
+{
+  "name": "speedtest-app",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Speed Test completo com diagnóstico de qualidade de Internet, baseado no motor @cloudflare/speedtest.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@cloudflare/speedtest": "1.14.2",
+    "next": "^16.3.5",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@testing-library/dom": "^10.4.0",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.8",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "fake-indexeddb": "^6.0.0",
+    "jsdom": "^29.1.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.12"
+  }
+}

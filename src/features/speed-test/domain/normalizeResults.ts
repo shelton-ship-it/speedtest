@@ -49,7 +49,7 @@ function sumTransferBytes(points: BandwidthPoint[]): number {
   return points.reduce((acc, p) => acc + (Number.isFinite(p.transferSize) && p.transferSize > 0 ? p.transferSize : p.bytes), 0);
 }
 
-function jitterFromPoints(points: number[]): number | null {
+export function jitterFromPoints(points: number[]): number | null {
   if (points.length < 2) return null;
   let sum = 0;
   for (let i = 1; i < points.length; i++) sum += Math.abs(points[i] - points[i - 1]);

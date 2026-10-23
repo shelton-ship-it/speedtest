@@ -61,7 +61,7 @@ export class FakeE2EAdapter implements SpeedTestAdapter {
   }
 
   private async run(): Promise<void> {
-    const phases = this.profile.phases.map((p) => p.type);
+    const phases = this.profile.phases.map((p) => p.kind);
     const uniq = [...new Set(phases)];
     for (let i = 0; i < uniq.length && !this.cancelled && !this.disposed; i++) {
       const t = uniq[i];

@@ -45,8 +45,20 @@ export type AdapterOptions = {
 };
 export type AdapterFactory = (opts: AdapterOptions) => SpeedTestAdapter | Promise<SpeedTestAdapter>;
 
+declare global {
+  interface Window {
+    /** Flag definida pelo modo E2E (?e2eFakeEngine=1) para evitar rede real. */
+    __SPEEDTEST_E2E_FAKE__?: boolean;
+  }
+}
+
 /** Motor de produção (Cloudflare). Pode ser substituído por injeção no construtor. */
 const productionAdapterFactory: AdapterFactory = async (opts) => {
+  // Modo E2E local: usa o motor falso determinístico (NUNCA em produção normal).
+  if (typeof window !== 'undefined' && window.__SPEEDTEST_E2E_FAKE__) {
+    const { FakeE2EAdapter } = await import('../engine/fakeEngineForE2E');
+    return new FakeE2EAdapter(opts);
+  }
   const { CloudflareSpeedTestAdapter } = await import('../engine/CloudflareSpeedTestAdapter');
   return new CloudflareSpeedTestAdapter(opts);
 };

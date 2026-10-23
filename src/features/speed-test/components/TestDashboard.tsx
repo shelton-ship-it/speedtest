@@ -21,6 +21,7 @@ const PHASE_LABEL: Record<string, string> = {
 export function SpeedTestApp() {
   const [locale, setLocale] = useState<Locale>('pt');
   const [unitMb, setUnitMb] = useState(false);
+  const [acknowledgedWarning, setAcknowledged] = useState<Set<string>>(new Set());
   const i18n = useMemo(() => makeI18n(locale), [locale]);
   const controllerRef = useRef<TestController | null>(null);
   if (!controllerRef.current) controllerRef.current = new TestController();
@@ -118,13 +119,26 @@ export function SpeedTestApp() {
           )}
           <p className="muted">{t(profile.descriptionKey)}</p>
           <p className="muted">{t('profile.budget', { req: profile.totalRequests, dl: fmtBytes(profile.maxDownloadBytes), ul: fmtBytes(profile.maxUploadBytes), dur: `${profile.expectedDurationSec[0]}–${profile.expectedDurationSec[1]} s` })}</p>
-          {profile.requiresDataWarning && !busy && snap.state === 'idle' && (
-            <p className="notice" role="alert">{t('profile.intensiveWarning')}</p>
+          {profile.requiresDataWarning && !acknowledgedWarning.has(profile.id) && (
+            <div className="notice" role="alert">
+              <p>{t('profile.intensiveWarning')}</p>
+              <button
+                data-testid="acknowledge-warning"
+                disabled={busy}
+                onClick={() => setAcknowledged((s) => new Set(s).add(profile.id))}
+              >
+                {t('action.acknowledgeWarning')}
+              </button>
+            </div>
           )}
           {controller.otherTabRunning && <p className="notice">{t('error.crossTab')}</p>}
 
           <div className="row" style={{ marginTop: 10 }}>
-            <button className="primary" onClick={() => controller.start()} disabled={busy || snap.state === 'checking'}>
+            <button
+              className="primary"
+              onClick={() => controller.start()}
+              disabled={busy || snap.state === 'checking' || (profile.requiresDataWarning && !acknowledgedWarning.has(profile.id))}
+            >
               {snap.session || ['completed', 'partial', 'cancelled', 'failed'].includes(snap.state) ? t('action.retry') : t('action.start')}
             </button>
             <button onClick={() => controller.pause()} disabled={snap.state !== 'running' || !snap.supportsPause}>{t('action.pause')}</button>

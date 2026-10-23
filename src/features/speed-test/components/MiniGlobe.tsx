@@ -4,7 +4,12 @@ import { useI18n } from '../i18n/useI18n';
 import { LAND_POLYGONS } from '../data/land110m';
 
 /**
- * Mini globo 3D (Canvas 2D, sem dependências externas).
+ * Globo 3D real (Canvas 2D com projeção ortográfica 3D completa — sem dependências externas).
+ * - Rotação em dois eixos (yaw + pitch) via matriz de rotação 3D, com profundidade por vértice,
+ *   iluminação de Lambert e ordenação pelo algoritmo do pintor (faces mais distantes primeiro).
+ * - Iluminação direcional com terminador dia/noite, halo atmosférico e brilho especular.
+ * - Sem interação de arrasto: a rotação é automática (idle lento / rápida durante o teste),
+ *   tal como no original — o gesto de hover no marcador foi preservado.
  * - Estado idle: roda lentamente; mostra um círculo na localização aproximada do utilizador
  *   (obtida via geo IP público — Cloudflare `__loc`; se indisponível, não inventa local).
  * - Hover no círculo → tooltip com cidade/país/região e nota de que é uma estimativa por IP.
@@ -46,17 +51,48 @@ const GLOBAL_NODES: Array<[number, number]> = [
   [41.01, 28.98],     // Istambul
 ];
 
-/** Projeção ortográfica simples: lon→yaw, com o eixo ligeiramente inclinado. */
-function project(lat: number, lon: number, yaw: number, r: number): { x: number; y: number; front: boolean } {
-  const la = lat * DEG;
-  const dLon = (lon * DEG) - yaw;
-  const x = Math.cos(la) * Math.sin(dLon);
-  const y = Math.sin(la);
-  const z = Math.cos(la) * Math.cos(dLon);
-  const tilt = 0.35; // vista ligeiramente de cima
-  const y2 = y * Math.cos(tilt) - z * Math.sin(tilt);
-  const z2 = y * Math.sin(tilt) + z * Math.cos(tilt);
-  return { x: x * r, y: -y2 * r, front: z2 > 0 };
+/** Vetor unitário 3D a partir de lat/lon (convenção geográfica). */
+function toVec(lat: number, lon: number): [number, number, number] {
+  const la = lat * DEG, lo = lon * DEG;
+  const c = Math.cos(la);
+  return [c * Math.sin(lo), Math.sin(la), c * Math.cos(lo)];
+}
+
+/** Matriz de rotação 3D (composta com ordem ZYX-like) aplicada a um vetor. */
+function rot(m: number[], x: number, y: number, z: number): [number, number, number] {
+  return [
+    m[0] * x + m[1] * y + m[2] * z,
+    m[3] * x + m[4] * y + m[5] * z,
+    m[6] * x + m[7] * y + m[8] * z,
+  ];
+}
+
+/** Constrói a matriz de rotação do globo a partir de yaw (em torno de Y) e pitch (em torno de X). */
+function rotationMatrix(yaw: number, pitch: number): number[] {
+  const cy = Math.cos(yaw), sy = Math.sin(yaw);
+  const cp = Math.cos(pitch), sp = Math.sin(pitch);
+  // Ry(yaw) * Rx(pitch)
+  return [
+    cy, sp * sy, -cp * sy,
+    0, cp, sp,
+    sy, -sp * cy, cp * cy,
+  ];
+}
+
+/**
+ * Projeção ortográfica 3D completa: aplica a matriz de rotação, devolve coordenadas de ecrã,
+ * profundidade (z da câmara) e coeficiente de iluminação de Lambert para o vetor de luz dado.
+ */
+function project3(
+  v: [number, number, number],
+  m: number[],
+  light: [number, number, number],
+  r: number,
+): { x: number; y: number; z: number; lit: number } {
+  const [x, y, z] = rot(m, v[0], v[1], v[2]);
+  const dot = x * light[0] + y * light[1] + z * light[2];
+  const lit = Math.max(0, dot);
+  return { x: x * r, y: -y * r, z, lit };
 }
 
 export function MiniGlobe({ spinning }: { spinning: boolean }) {
@@ -97,6 +133,12 @@ export function MiniGlobe({ spinning }: { spinning: boolean }) {
     return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   }, []);
 
+  // Pré-converte os polígonos de terra para vetores 3D unitários (uma vez).
+  const landVecs = useMemo(
+    () => LAND_POLYGONS.map((poly) => poly.map(([lo, la]) => toVec(la, lo))),
+    [],
+  );
+
   // Animação (requestAnimationFrame — rápida e fluida; pausa quando fora do viewport).
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -105,6 +147,7 @@ export function MiniGlobe({ spinning }: { spinning: boolean }) {
     if (!ctx) return;
     let raf = 0;
     let yaw = -0.4;
+    let pitch = 0.35; // vista ligeiramente de cima
     let speed = 0.003;
     let last = performance.now();
     let visible = true;
@@ -119,7 +162,7 @@ export function MiniGlobe({ spinning }: { spinning: boolean }) {
     canvas.width = SIZE * dpr;
     canvas.height = SIZE * dpr;
     ctx.scale(dpr, dpr);
-    const cx = SIZE / 2, cy = SIZE / 2, R = SIZE / 2 - 10;
+    const cx = SIZE / 2, cy = SIZE / 2, R = SIZE / 2 - 14;
 
     function draw(now: number) {
       const dt = Math.min(50, now - last);
@@ -136,79 +179,128 @@ export function MiniGlobe({ spinning }: { spinning: boolean }) {
         const panel2 = cs.getPropertyValue('--panel-2').trim() || '#1f2630';
         const ok = cs.getPropertyValue('--ok').trim() || '#3ecf8e';
 
+        const M = rotationMatrix(yaw, pitch);
+        // Luz direcional fixa na cena (câmara): esquerda-frente-cima → hemisfério direito fica
+        // na sombra, criando um terminador dia/noite visível enquanto o globo gira.
+        const lx = -0.5, ly = 0.55, lz = 0.67;
+        const ll = Math.hypot(lx, ly, lz);
+        const light: [number, number, number] = [lx / ll, ly / ll, lz / ll];
+
         ctx!.clearRect(0, 0, SIZE, SIZE);
-        // esfera
-        const grad = ctx!.createRadialGradient(cx - R * 0.3, cy - R * 0.3, R * 0.2, cx, cy, R);
+
+        // halo atmosférico (brilho atrás da esfera — efeito 3D de atmosfera)
+        const halo = ctx!.createRadialGradient(cx, cy, R * 0.9, cx, cy, R * 1.25);
+        halo.addColorStop(0, accent + '55');
+        halo.addColorStop(1, accent + '00');
+        ctx!.beginPath();
+        ctx!.arc(cx, cy, R * 1.25, 0, Math.PI * 2);
+        ctx!.fillStyle = halo;
+        ctx!.fill();
+
+        // esfera base com sombreamento 3D (gradiente deslocado na direção da luz)
+        const grad = ctx!.createRadialGradient(
+          cx + light[0] * R * 0.55, cy - light[1] * R * 0.55, R * 0.1,
+          cx, cy, R,
+        );
         grad.addColorStop(0, panel2);
-        grad.addColorStop(1, border);
+        grad.addColorStop(0.75, border);
+        grad.addColorStop(1, '#0b0f14');
         ctx!.beginPath();
         ctx!.arc(cx, cy, R, 0, Math.PI * 2);
         ctx!.fillStyle = grad;
         ctx!.fill();
-        ctx!.strokeStyle = accent;
-        ctx!.globalAlpha = 0.5;
-        ctx!.lineWidth = 1;
-        ctx!.stroke();
-        ctx!.globalAlpha = 1;
 
-        // continentes (Natural Earth 110m) — recortados pela esfera, frente apenas
+        // recorte pela esfera para desenhar conteúdo 3D
         ctx!.save();
         ctx!.beginPath();
         ctx!.arc(cx, cy, R - 0.5, 0, Math.PI * 2);
         ctx!.clip();
-        for (const poly of LAND_POLYGONS) {
-          let started = false;
-          let anyFront = false;
-          for (const [lo, la] of poly) {
-            const p = project(la, lo, yaw, R);
-            if (p.front) anyFront = true;
+
+        // continentes (Natural Earth 110m) — face frontal apenas, com profundidade média
+        type Face = { depth: number; pts: Array<{ x: number; y: number; lit: number }> };
+        const faces: Face[] = [];
+        for (const poly of landVecs) {
+          let sumZ = 0, nFront = 0;
+          const pts: Array<{ x: number; y: number; lit: number }> = [];
+          for (const v of poly) {
+            const p = project3(v, M, light, R);
+            if (p.z > 0) nFront++;
+            sumZ += p.z;
+            pts.push(p);
           }
-          if (!anyFront) continue;
+          if (nFront < 2) continue;
+          faces.push({ depth: sumZ / pts.length, pts });
+        }
+        // ordenação pelo algoritmo do pintor: desenha primeiro o que está mais longe
+        faces.sort((a, b) => a.depth - b.depth);
+        for (const f of faces) {
           ctx!.beginPath();
-          for (const [lo, la] of poly) {
-            const p = project(la, lo, yaw, R);
-            if (!started) { ctx!.moveTo(cx + p.x, cy + p.y); started = true; }
+          for (let i = 0; i < f.pts.length; i++) {
+            const p = f.pts[i];
+            if (i === 0) ctx!.moveTo(cx + p.x, cy + p.y);
             else ctx!.lineTo(cx + p.x, cy + p.y);
           }
           ctx!.closePath();
+          // brilho médio dos vértices → face mais clara voltada para a luz, mais escura no terminador
+          let litSum = 0;
+          for (const p of f.pts) litSum += p.lit;
+          const litAvg = litSum / f.pts.length;
+          const depthShade = Math.max(0.15, 0.35 + 0.65 * ((f.depth + 1) / 2));
+          ctx!.globalAlpha = 0.10 + 0.30 * litAvg * depthShade;
           ctx!.fillStyle = accent;
-          ctx!.globalAlpha = 0.14;
           ctx!.fill();
+          ctx!.globalAlpha = 0.25 + 0.45 * litAvg;
           ctx!.strokeStyle = accent;
-          ctx!.globalAlpha = 0.5;
           ctx!.lineWidth = 0.8;
           ctx!.stroke();
-          ctx!.globalAlpha = 1;
         }
-        ctx!.restore();
 
-        // grelha (meridianos/paralelos)
+        // grelha 3D (meridianos/paralelos) — segmentos com z>0, atenuados pela profundidade
         ctx!.strokeStyle = accent;
-        ctx!.globalAlpha = 0.10;
-        for (let m = 0; m < 6; m++) {
-          const phase = ((yaw * 0.5 + (m * Math.PI) / 6) % Math.PI + Math.PI) % Math.PI;
-          const rx = Math.abs(Math.cos(phase)) * R;
-          ctx!.beginPath();
-          ctx!.ellipse(cx, cy, Math.max(0.5, rx), R, 0, 0, Math.PI * 2);
-          ctx!.stroke();
+        ctx!.lineWidth = 0.6;
+        for (let mIdx = 0; mIdx < 6; mIdx++) {
+          const lon0 = mIdx * 30;
+          let prev: { x: number; y: number; z: number } | null = null;
+          for (let la = -90; la <= 90; la += 5) {
+            const p = project3(toVec(la, lon0), M, light, R);
+            if (p.z > 0 && prev && prev.z > 0) {
+              ctx!.globalAlpha = 0.06 + 0.10 * ((p.z + prev.z) / 2);
+              ctx!.beginPath();
+              ctx!.moveTo(cx + prev.x, cy + prev.y);
+              ctx!.lineTo(cx + p.x, cy + p.y);
+              ctx!.stroke();
+            }
+            prev = p;
+          }
         }
-        for (let p = -60; p <= 60; p += 30) {
-          const pr = Math.cos(p * DEG) * R;
-          const py = -Math.sin(p * DEG) * R * Math.cos(0.35);
-          ctx!.beginPath();
-          ctx!.ellipse(cx, cy + py, pr, pr * 0.18, 0, 0, Math.PI * 2);
-          ctx!.stroke();
+        for (let la = -60; la <= 60; la += 30) {
+          let prev: { x: number; y: number; z: number } | null = null;
+          for (let lo = -180; lo <= 180; lo += 5) {
+            const p = project3(toVec(la, lo), M, light, R);
+            if (p.z > 0 && prev && prev.z > 0) {
+              ctx!.globalAlpha = 0.06 + 0.10 * ((p.z + prev.z) / 2);
+              ctx!.beginPath();
+              ctx!.moveTo(cx + prev.x, cy + prev.y);
+              ctx!.lineTo(cx + p.x, cy + p.y);
+              ctx!.stroke();
+            }
+            prev = p;
+          }
         }
         ctx!.globalAlpha = 1;
 
-        // nós globais decorativos
-        const nodeXy = GLOBAL_NODES.map(([la, lo], i) => ({ i, ...project(la, lo, yaw, R) }));
+        // nós globais decorativos (esferas em miniatura com sombra/half-tone 3D)
+        const nodeXy = GLOBAL_NODES.map(([la, lo], i) => {
+          const p = project3(toVec(la, lo), M, light, R);
+          return { i, ...p };
+        });
         for (const n of nodeXy) {
-          if (!n.front) continue;
+          if (n.z <= 0) continue;
+          const rr = 1.2 + 1.2 * n.z; // tamanho aparente cresce com a proximidade da câmera
           ctx!.beginPath();
-          ctx!.arc(cx + n.x, cy + n.y, 1.6, 0, Math.PI * 2);
+          ctx!.arc(cx + n.x, cy + n.y, rr, 0, Math.PI * 2);
           ctx!.fillStyle = accent;
-          ctx!.globalAlpha = 0.85;
+          ctx!.globalAlpha = 0.35 + 0.55 * n.z * (0.3 + 0.7 * n.lit);
           ctx!.fill();
           ctx!.globalAlpha = 1;
         }
@@ -216,24 +308,25 @@ export function MiniGlobe({ spinning }: { spinning: boolean }) {
         // pulsos durante o teste (ligam o utilizador a nós visíveis — puramente decorativo)
         if (spinRef.current && !reduced && now - lastPulse > 420) {
           lastPulse = now;
-          const front = nodeXy.filter((n) => n.front);
+          const front = nodeXy.filter((n) => n.z > 0);
           if (front.length) pulses.push({ node: front[Math.floor(Math.random() * front.length)].i, start: now });
         }
         if (loc !== 'loading' && loc !== 'unavailable') {
-          const me = project(loc.lat, loc.lon, yaw, R);
+          const me = project3(toVec(loc.lat, loc.lon), M, light, R);
           for (let k = pulses.length - 1; k >= 0; k--) {
             const pu = pulses[k];
             const age = (now - pu.start) / 1400;
             if (age > 1) { pulses.splice(k, 1); continue; }
             const n = nodeXy[pu.node];
-            if (!me.front || !n.front) continue;
+            if (me.z <= 0 || n.z <= 0) continue;
             const steps = 14;
             ctx!.beginPath();
             for (let sIdx = 0; sIdx <= steps; sIdx++) {
               const f = sIdx / steps;
-              const lx = me.x + (n.x - me.x) * f;
-              const ly = me.y + (n.y - me.y) * f - Math.sin(f * Math.PI) * 22; // arco
-              if (sIdx === 0) ctx!.moveTo(cx + lx, cy + ly); else ctx!.lineTo(cx + lx, cy + ly);
+              const lift = Math.sin(f * Math.PI) * 22 * (0.5 + 0.5 * ((me.z + n.z) / 2)); // arco maior na frente
+              const lx2 = me.x + (n.x - me.x) * f;
+              const ly2 = me.y + (n.y - me.y) * f - lift;
+              if (sIdx === 0) ctx!.moveTo(cx + lx2, cy + ly2); else ctx!.lineTo(cx + lx2, cy + ly2);
             }
             ctx!.setLineDash([3, 5]);
             ctx!.lineDashOffset = -age * 60;
@@ -245,7 +338,7 @@ export function MiniGlobe({ spinning }: { spinning: boolean }) {
             ctx!.globalAlpha = 1;
           }
           // marcador do utilizador (círculo com hover)
-          if (me.front) {
+          if (me.z > 0) {
             const px = cx + me.x, py = cy + me.y;
             (canvas as HTMLCanvasElement & { _marker?: { x: number; y: number } })._marker = { x: px, y: py };
             const pulseR = spinRef.current && !reduced ? 6 + 3 * Math.sin(now / 180) : 6;
@@ -266,12 +359,48 @@ export function MiniGlobe({ spinning }: { spinning: boolean }) {
             (canvas as HTMLCanvasElement & { _marker?: { x: number; y: number } })._marker = undefined;
           }
         }
+
+        ctx!.restore();
+
+        // terminador dia/noite: sobreposição escura no hemisfério oposto à luz
+        const night = ctx!.createRadialGradient(
+          cx - light[0] * R * 1.4, cy + light[1] * R * 1.4, R * 0.2,
+          cx - light[0] * R * 0.6, cy + light[1] * R * 0.6, R * 1.5,
+        );
+        night.addColorStop(0, 'rgba(4,7,12,0.55)');
+        night.addColorStop(0.55, 'rgba(4,7,12,0.22)');
+        night.addColorStop(1, 'rgba(4,7,12,0)');
+        ctx!.beginPath();
+        ctx!.arc(cx, cy, R - 0.5, 0, Math.PI * 2);
+        ctx!.fillStyle = night;
+        ctx!.fill();
+
+        // brilho especular (realce de "esfera de vidro")
+        const spec = ctx!.createRadialGradient(
+          cx + light[0] * R * 0.5, cy - light[1] * R * 0.5, 0,
+          cx + light[0] * R * 0.5, cy - light[1] * R * 0.5, R * 0.5,
+        );
+        spec.addColorStop(0, 'rgba(255,255,255,0.16)');
+        spec.addColorStop(1, 'rgba(255,255,255,0)');
+        ctx!.beginPath();
+        ctx!.arc(cx, cy, R - 0.5, 0, Math.PI * 2);
+        ctx!.fillStyle = spec;
+        ctx!.fill();
+
+        // limbo (arco iluminado na borda virada para a luz)
+        ctx!.beginPath();
+        ctx!.arc(cx, cy, R, 0, Math.PI * 2);
+        ctx!.strokeStyle = accent;
+        ctx!.globalAlpha = 0.5;
+        ctx!.lineWidth = 1;
+        ctx!.stroke();
+        ctx!.globalAlpha = 1;
       }
       raf = requestAnimationFrame(draw);
     }
     raf = requestAnimationFrame(draw);
     return () => { cancelAnimationFrame(raf); io.disconnect(); };
-  }, [reduced, hover, loc]);
+  }, [reduced, hover, loc, landVecs]);
 
   const marker = (canvasRef.current as (HTMLCanvasElement & { _marker?: { x: number; y: number } }) | null)?._marker;
   function onMove(e: React.MouseEvent<HTMLCanvasElement>) {
